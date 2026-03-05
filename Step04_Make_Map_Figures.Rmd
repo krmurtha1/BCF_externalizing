@@ -1,0 +1,337 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+This notebook makes plots for different geocoded outcomes. 
+
+First, load pacakges:
+```{r}
+library(tidycensus)
+library(segregation)
+library(sf)
+library(dplyr)
+library(tigris); options(tigris_use_cache = TRUE, tigris_class = "sf")
+```
+
+Next, activate census API key to get data: 
+```{r}
+#census_api_key("a87750e90a085eca30a55092960ed348457fea91", install = TRUE)
+```
+---
+ADI
+---
+Load ADI from download:
+```{r}
+adi<- read.csv('~/Downloads/adi-download-2/US_2023_ADI_Census_Block_Group_v4_0_1.csv')%>%
+  mutate(FIPS = as.character(FIPS))
+```
+
+Convert to GEOID:
+```{r}
+adi_bg <- adi %>%                    
+  mutate(
+    FIPS  = as.character(FIPS),          
+    GEOID = str_pad(FIPS, 12, pad = "0"))
+```
+
+Get block groups for PA, CA and WA and join with adi
+```{r}
+block_groups_pa <- block_groups(state = "PA", year = 2023, cb = TRUE)  
+block_groups_ca <- block_groups(state = "CA", year = 2023, cb = TRUE)  
+block_groups_mo <- block_groups(state = "MO", year = 2023, cb = TRUE)
+block_groups_wa <- block_groups(state = "WA", year = 2023, cb = TRUE)
+block_groups_or <- block_groups(state = "OR", year = 2023, cb = TRUE)
+block_groups_il <- block_groups(state = "IL", year = 2023, cb = TRUE)
+
+block_groups<- rbind(block_groups_pa, block_groups_mo, block_groups_ca, block_groups_or, block_groups_wa, block_groups_il)
+
+bg_adi <- dplyr::left_join(block_groups, adi_bg, by = "GEOID")    %>%
+   mutate(ADI_NATRANK = as.numeric(ADI_NATRANK))# keeps geometry
+```
+
+Pin to just cities 
+```{r}
+pittsburgh <- places(state = "PA", year = 2023, cb = TRUE) %>% filter(NAME == "Pittsburgh")
+losangeles <- places(state = "CA", year = 2023, cb = TRUE) %>% filter(NAME == "Los Angeles")
+stlouis <- places(state = "MO", year = 2023, cb = TRUE) %>% filter(NAME == "St. Louis")
+portland <- places(state = "OR", year = 2023, cb = TRUE) %>% filter(NAME == "Portland")
+
+cities_sf<- rbind(pittsburgh, losangeles, stlouis, portland)
+
+bg_adi_city <- st_filter(bg_adi, cities_sf)%>%
+  mutate(ADI_NATRANK = as.numeric(ADI_NATRANK))
+bg_adi_city <- st_join(bg_adi_city, cities_sf %>% select(NAME), join = st_intersects)
+
+# make sure it's a factor so facet_wrap shows names, not 1..7
+bg_adi_city <- bg_adi_city %>%
+  mutate(NAME = as.factor(NAME.y))
+```
+
+Plot ADI: 
+```{r}
+custom_colors_adi <- colorRampPalette(c("#F1F1F1","#4A8DBA"))
+
+or_adi<- bg_adi %>% filter(STATEFP%in% c('41', '53'))%>%
+  ggplot() +
+  geom_sf(aes(fill = ADI_NATRANK)) +
+  scale_fill_gradientn(colors = custom_colors_adi(5)) +
+  coord_sf(
+  xlim = c(-122.9, -122.4),
+  ylim = c( 45.70, 45.40))+
+  theme_void() +
+  labs(fill = "ADI")
+or_adi
+
+pa_adi<- bg_adi %>% filter(STATEFP%in% c('42'))%>%
+  ggplot() +
+  geom_sf(aes(fill = ADI_NATRANK)) +
+  scale_fill_gradientn(colors = custom_colors_adi(5)) +
+  coord_sf(
+  xlim = c(-80.15, -79.85),
+  ylim = c( 40.55, 40.35))+
+  theme_void() +
+  labs(fill = "ADI")
+pa_adi
+
+mo_adi<- bg_adi %>% filter(STATEFP%in% c('29', '17'))%>%
+  ggplot() +
+  geom_sf(aes(fill = ADI_NATRANK)) +
+  scale_fill_gradientn(colors = custom_colors_adi(5)) +
+  coord_sf(
+  xlim = c(-90.35, -90),
+  ylim = c( 38.55, 38.825))+
+  theme_void() +
+  labs(fill = "ADI")
+mo_adi
+```
+
+```{r}
+adi<-box_read('1277087025313', fread=TRUE)
+adi<-adi%>%
+  filter(eventname=="baseline_year_1_arm_1")%>%
+  mutate(adi_bin = case_when(reshist_addr1_adi_wsum <= 87.862045 ~ 0, #low deprivation
+                             reshist_addr1_adi_wsum >= 108.394920 ~ 1))%>% #high deprivation
+  select(src_subject_id, reshist_addr1_adi_wsum, adi_bin)
+
+
+density_adi<- ggplot(adi, aes(y = reshist_addr1_adi_wsum)) +
+  stat_density(
+    aes(x = -after_stat(density)),
+    geom = "area",
+    fill = "#4A8DBA",color ='#4A8DBA',
+    alpha = 0.5
+  ) + scale_y_continuous(limits = c(0, 130)) +theme_void()
+
+density_adi
+```
+
+---
+CRIME
+---
+Now read in crime and filter for PA, MO, and OR
+```{r}
+crime<- read.table('~/Downloads/ICPSR_33523-2/DS0004/33523-0004-Data.tsv', sep="\t", header=T)%>%
+  filter(FIPS_ST %in% c(6, 29, 41, 42, 17, 53, 54, 39, 24))%>%
+  rowwise()%>%
+  mutate(total_crime = VIOL + PROPERTY + MURDER +RAPE +ROBBERY+ AGASSLT+ BURGLRY+LARCENY+MVTHEFT)%>%
+  mutate(FIPS_ST = str_pad(FIPS_ST, 2, pad = "0"))%>%
+  mutate(FIPS_CTY = str_pad(FIPS_CTY, 3, pad = "0"))%>%
+  mutate(GEOID = paste0(FIPS_ST, FIPS_CTY))
+```
+
+Get counties for PA, CA and WA and join with adi
+```{r}
+counties_pa <- counties(state = c("PA", "WV", "OH", "MD"), year = 2023, cb = TRUE)  
+counties_mo <- counties(state = c("MO", "IL"), year = 2023, cb = TRUE)
+counties_or <- counties(state = c("OR", "WA"), year = 2023, cb = TRUE)
+
+counties<- rbind(counties_pa, counties_mo, counties_or)%>%
+  mutate(FIPS_CTY = GEOID)
+
+bg_crime <- left_join(counties, crime, by = "GEOID")
+```
+
+```{r}
+custom_colors_crime <- colorRampPalette(c("#F1F1F1","#5e3c99"))
+
+pa_crime<- bg_crime %>% filter(STATE_NAME%in% c('Pennsylvania', 'West Virginia', 'Ohio', 'Maryland'))%>%
+  ggplot() +
+  geom_sf(aes(fill = total_crime)) +
+  scale_fill_gradientn(colors = custom_colors_crime(5), limits=c(0, 102678)) +
+  coord_sf(xlim = c(-81.1779, -78.8139), ylim = c(39.5406, 41.3406))+
+  theme_void() +
+  labs(fill = "Total Crime")
+pa_crime
+
+
+or_crime<- bg_crime %>% filter(STATE_NAME %in% c('Oregon', 'Washington'))%>%
+  ggplot() +
+  geom_sf(aes(fill = total_crime)) +
+  scale_fill_gradientn(colors = custom_colors_crime(5), limits=c(0, 102678)) +
+  coord_sf(
+  xlim = c(-122.6765 - 1.282,  -122.6765 + 1.282),
+  ylim = c( 45.5231 - 0.900,    45.5231 + 0.900))+
+  theme_void() +
+  labs(fill = "Total Crime")
+or_crime
+
+mo_crime<- bg_crime %>% filter(STATE_NAME%in% c('Missouri', 'Illinois'))%>%
+  ggplot() +
+  geom_sf(aes(fill = total_crime)) +
+  scale_fill_gradientn(colors = custom_colors_crime(5),  limits=c(0, 102678)) +
+  coord_sf(
+  xlim = c(-91.3624, -89.0364), ylim = c(37.7270, 39.5270))+
+  theme_void() +
+  labs(fill = "Total Crime")
+mo_crime
+```
+
+```{r}
+crime<-box_read('1277095261533', fread=TRUE)
+crime<- crime%>%
+  filter(eventname=="baseline_year_1_arm_1")%>%
+  select(src_subject_id, reshist_addr1_grndtot)%>%
+  mutate(crime_log = (reshist_addr1_grndtot +1)^1/3)%>%
+  mutate(crime_bins = cut(reshist_addr1_grndtot, breaks = 6))%>%
+  mutate(crime_bin = case_when(reshist_addr1_grndtot <= 7832.00 ~ 0, 
+                               reshist_addr1_grndtot >= 53399.67 ~ 1))
+
+
+density_crime<- ggplot(crime, aes(y = reshist_addr1_grndtot)) +
+  stat_density(
+    aes(x = -after_stat(density)),
+    geom = "area",
+    fill = "#5e3c99",color ='#5e3c99',
+    alpha = 0.5
+  ) +scale_y_continuous(0, 348050) +theme_void()
+
+density_crime
+```
+
+---
+Green space
+---
+get park data (prop_park_area_tract)
+```{r}
+green<- read.table('~/Downloads/ICPSR_38586/DS0003/38586-0003-Data.tsv', sep="\t", header=T)%>%
+  mutate(GEOID = as.character(TRACT_FIPS20))
+```
+
+Get block groups for PA, CA and WA and join with adi
+```{r}
+tract_groups_pa <- tracts(state = "PA", year = 2023, cb = TRUE)  
+tract_groups_ca <- tracts(state = "CA", year = 2023, cb = TRUE)  
+tract_groups_mo <- tracts(state = "MO", year = 2023, cb = TRUE)
+tract_groups_wa <- tracts(state = "WA", year = 2023, cb = TRUE)
+tract_groups_il <- tracts(state = "IL", year = 2023, cb = TRUE)
+tract_groups_or <- tracts(state = "OR", year = 2023, cb = TRUE)
+
+tract_groups<- rbind(tract_groups_pa, tract_groups_mo, tract_groups_ca, tract_groups_or, tract_groups_wa, tract_groups_il)
+
+bg_green <- dplyr::left_join(tract_groups, green, by = "GEOID")       # keeps geometry
+```
+
+Pin to just cities 
+```{r}
+pittsburgh <- places(state = "PA", year = 2023, cb = TRUE) %>% filter(NAME == "Pittsburgh")
+losangeles <- places(state = "CA", year = 2023, cb = TRUE) %>% filter(NAME == "Los Angeles")
+stlouis <- places(state = "MO", year = 2023, cb = TRUE) %>% filter(NAME == "St. Louis")
+portland <- places(state = "OR", year = 2023, cb = TRUE) %>% filter(NAME == "Portland")
+
+cities_sf<- rbind(pittsburgh, losangeles, stlouis, portland)
+
+bg_green_city <- st_filter(bg_green, cities_sf)
+bg_green_city <- st_join(bg_green_city, cities_sf %>% select(NAME), join = st_intersects)
+
+# make sure it's a factor so facet_wrap shows names, not 1..7
+bg_green_city <- bg_green_city %>%
+  mutate(NAME = as.factor(NAME.y))
+```
+
+```{r}
+custom_colors_green <- colorRampPalette(c("#F1F1F1","#5CA81E"))
+
+or_green<- bg_green %>% filter(STATE_NAME%in% c('Oregon', 'Washington'))%>%
+  ggplot() +
+  geom_sf(aes(fill = PROP_PARK_AREA_TRACT)) +
+  scale_fill_gradientn(colors = custom_colors_green(5)) +
+  coord_sf(
+  xlim = c(-122.9, -122.4),
+  ylim = c( 45.70, 45.40))+
+  theme_void() +
+  labs(fill = "Proportion Green Space")
+or_green
+
+pa_green<- bg_green %>% filter(STATE_NAME%in% c('Pennsylvania'))%>%
+  ggplot() +
+  geom_sf(aes(fill = PROP_PARK_AREA_TRACT)) +
+  scale_fill_gradientn(colors = custom_colors_green(5)) +
+  coord_sf(
+  xlim = c(-80.15, -79.85),
+  ylim = c( 40.55, 40.35))+
+  theme_void() +
+  labs(fill = "Proportion Green Space")
+pa_green
+
+mo_green<- bg_green %>% filter(STATE_NAME%in% c('Missouri', 'Illinois'))%>%
+  ggplot() +
+  geom_sf(aes(fill = PROP_PARK_AREA_TRACT)) +
+  scale_fill_gradientn(colors = custom_colors_green(5)) +
+  coord_sf(
+  xlim = c(-90.35, -90),
+  ylim = c( 38.55, 38.825))+
+  labs(fill = "Proportion Green Space") +theme_void()
+mo_green
+```
+
+```{r}
+#read in greenspace
+green<-box_read('1277088493816', fread=TRUE)
+green<-green%>%
+  filter(eventname=="baseline_year_1_arm_1")%>%
+  mutate(green_bin = case_when(reshist_addr1_coi_he_green <= 14 ~ 0, #low green
+                             reshist_addr1_coi_he_green >= 48.025 ~ 1))%>% #high green
+  select(src_subject_id, reshist_addr1_coi_he_green, green_bin)
+
+density_green<- ggplot(green, aes(y = reshist_addr1_coi_he_green)) +
+  stat_density(
+    aes(x = -after_stat(density)),
+    geom = "area",
+    fill = "#5CA81E",color ='#5CA81E',
+    alpha = 0.5
+  )  +theme_void()
+
+density_green
+```
+
+arrange: 
+```{r}
+(density_adi + or_adi + pa_adi + mo_adi +
+ density_green + or_green + pa_green + mo_green +
+ density_crime + or_crime + pa_crime + mo_crime) +
+  plot_layout(ncol = 4, guides = "collect") &
+  theme(
+    legend.position = "right",
+    plot.margin = margin(5, 5, 5, 5)
+  )
+```
+```{r}
+ggsave(file="density_adi.svg", plot=density_adi, width=8, height=8)
+ggsave(file="density_green.svg", plot=density_green, width=8, height=8)
+ggsave(file="density_crime.svg", plot=density_crime, width=8, height=8)
+
+ggsave(file="or_adi.svg", plot=or_adi, width=8.5, height=8)
+ggsave(file="pa_adi.svg", plot=pa_adi, width=8.5, height=8)
+ggsave(file="mo_adi.svg", plot=mo_adi, width=8.5, height=8)
+
+ggsave(file="or_green.svg", plot=or_green, width=8.5, height=8)
+ggsave(file="pa_green.svg", plot=pa_green, width=8.5, height=8)
+ggsave(file="mo_green.svg", plot=mo_green, width=8.5, height=8)
+
+ggsave(file="or_crime.svg", plot=or_crime, width=8.5, height=8)
+ggsave(file="pa_crime.svg", plot=pa_crime, width=8.5, height=8)
+ggsave(file="mo_crime.svg", plot=mo_crime, width=8.5, height=8)
+```
+
+```

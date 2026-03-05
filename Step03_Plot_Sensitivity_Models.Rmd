@@ -1,0 +1,531 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+Read in data: 
+```{r}
+setwd("/Users/edenlab/Library/CloudStorage/OneDrive-PennO365/Double_Hit/2025")
+completed_data<- read.csv('bcf_completed_data.csv', header=T)
+```
+
+Make a function to plot: 
+```{r}
+get_ate_draws <- function(fit) {
+  # fit$tau is (draws x N). Row means = ATE draw for each iteration.
+  rowMeans(fit$tau)
+}
+
+get_subgroup_ate_draws <- function(fit, moderator, model_label, mod_label = "Moderator") {
+  tau_draws <- fit$tau                       # (draws x N)
+  stopifnot(ncol(tau_draws) == length(moderator))  # ensure alignment
+
+  # Coerce moderator to Low/High factor robustly (handles 0/1 or strings)
+  if (is.numeric(moderator)) {
+    mod_cat <- factor(moderator, levels = c(0,1), labels = c("Low","High"))
+  } else {
+    # accept "0"/"1" or already "Low"/"High"
+    if (all(unique(moderator) %in% c("0","1"))) {
+      mod_cat <- factor(moderator, levels = c("0","1"), labels = c("Low","High"))
+    } else {
+      mod_cat <- factor(moderator)
+      # try to standardize common labels
+      levels(mod_cat) <- sub("^(low).*","Low", tolower(levels(mod_cat)))
+      levels(mod_cat) <- sub("^(high).*","High", tolower(levels(mod_cat)))
+      mod_cat <- factor(mod_cat, levels = c("Low","High"))
+    }
+  }
+
+  idx_low  <- which(mod_cat == "Low")
+  idx_high <- which(mod_cat == "High")
+  stopifnot(length(idx_low)  > 0, length(idx_high) > 0)
+
+  ATE_low_draws  <- rowMeans(tau_draws[, idx_low,  drop = FALSE])
+  ATE_high_draws <- rowMeans(tau_draws[, idx_high, drop = FALSE])
+
+  bind_rows(
+    tibble(model = model_label, group = paste("Low",  mod_label), ATE = ATE_low_draws),
+    tibble(model = model_label, group = paste("High", mod_label), ATE = ATE_high_draws)
+  )
+}
+```
+
+load models:
+```{r}
+setwd('/Users/edenlab/OneDrive - PennO365/Double_Hit/2025/sensitivity')
+
+load("bcf_model_conduct_adi_BIN_t1.RData")
+load("bcf_model_odd_adi_BIN_t1.RData")
+load("bcf_model_adhd_adi_BIN_t1.RData")
+```
+
+Run loop for ADI:
+```{r}
+fits_mod <- list(
+  "ODD (T1)"  = bcf_out_SENS_odd_adi_BIN_t1,
+  "CD (T1)"   = bcf_out_SENS_con_adi_BIN_t1,
+  "ADHD (T1)" = bcf_out_SENS_add_adi_BIN_t1
+)
+
+mod_name <- "adi_bin"   
+
+ate_long_mod <- imap_dfr(
+  fits_mod,
+  ~ get_subgroup_ate_draws(
+      fit         = .x,
+      moderator   = completed_data[[mod_name]],
+      model_label = .y,
+      mod_label   = "ADI"          # label to print next to Low/High (customize per your moderator)
+    ))%>%
+  mutate(model = factor(model, level = c("CD (T1)", "ODD (T1)", "ADHD (T1)"), 
+                        labels = c("CD (T1)", "ODD (T1)", "ADHD (T1)")))
+```
+
+Plot ADI models: 
+```{r}
+sum_df <- ate_long_mod %>%
+  group_by(model, group) %>%
+  dplyr::summarize(
+    low95 = quantile(ATE, .025),
+    med   = median(ATE),
+    up95  = quantile(ATE, .975),
+    .groups = "drop"
+  )
+
+sum_df
+
+delta_df <- ate_long_mod %>%
+  rename_with(~ "ATE", .cols = matches("^(ATE|ate)$"), ignore.case = TRUE) %>%
+  group_by(model, group) %>%
+  arrange(model, group) %>%          # keep order predictable
+  mutate(draw = row_number()) %>%    # index draws within each model x group
+  ungroup()%>%
+  pivot_wider(
+    id_cols   = c(model, draw),
+    names_from = group,
+    values_from = ATE,
+    names_prefix = "ATE_"
+  )%>%
+  mutate(delta = `ATE_High ADI` - `ATE_Low ADI`)%>%
+  group_by(model) %>%
+  dplyr::summarize(
+    delta_low95 = quantile(delta, probs = 0.025, na.rm = TRUE),
+    delta_med   = median(delta, na.rm = TRUE),
+    delta_up95  = quantile(delta, probs = 0.975, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+delta_df
+
+peaks <- ate_long_mod %>%
+  group_by(model, group) %>%
+  dplyr::summarize(peak_y = max(density(ATE)$y), .groups = "drop")
+
+sum_df2 <- left_join(sum_df, peaks, by = c("model","group")) %>%
+  pivot_longer(c(low95, med, up95), names_to = "stat", values_to = "x")
+
+adi_t1<- ggplot(ate_long_mod, aes(x = ATE, fill = group)) +
+  geom_density(alpha = 0.75) +
+  # short vertical markers (peak height) for each subgroup & model
+  geom_segment(data = sum_df2,
+               aes(x = x, xend = x, y = 0, yend = peak_y,
+                   color = group, linetype = stat),
+               linewidth = 0.7, show.legend = TRUE) +
+  scale_fill_manual(values = c("Low ADI" = "#CDE8FA", "High ADI" = "#4A8DBA")) +   # adjust if you changed mod_label
+  scale_color_manual(values = c("Low ADI" = "#CDE8FA", "High ADI" = "#4A8DBA")) +
+  scale_linetype_manual(values = c(low95 = "dashed", med = "solid", up95 = "dashed")) +
+  facet_wrap(~ model, ncol = 1, scales = "free_y") +
+  labs(x = "Average Treatment Effect (τ̄) within subgroup",
+       y = "Posterior density",
+       fill = "Moderator", color = "Moderator", linetype = NULL) +
+  theme_classic() +  guides(linetype="none") + theme(legend.position='bottom') 
+
+adi_t1
+
+```
+load models:
+```{r}
+setwd('/Users/edenlab/OneDrive - PennO365/Double_Hit/2025/sensitivity')
+
+load("bcf_model_conduct_crime_BIN_t1.RData")
+load("bcf_model_odd_crime_BIN_t1.RData")
+load("bcf_model_adhd_crime_BIN_t1.RData")
+```
+
+Run loop for Crime:
+```{r}
+fits_mod <- list(
+  "ODD (T1)"  = bcf_out_odd_crime_BIN_t1,
+  "CD (T1)"   = bcf_out_con_crime_BIN_t1,
+  "ADHD (T1)" = bcf_out_add_crime_BIN_t1
+)
+
+mod_name <- "crime_bin"   
+
+ate_long_mod <- imap_dfr(
+  fits_mod,
+  ~ get_subgroup_ate_draws(
+      fit         = .x,
+      moderator   = completed_data[[mod_name]],
+      model_label = .y,
+      mod_label   = "Crime"          # label to print next to Low/High (customize per your moderator)
+    ))%>%
+  mutate(model = factor(model, level = c("CD (T1)", "ODD (T1)", "ADHD (T1)"), 
+                        labels = c("CD (T1)", "ODD (T1)", "ADHD (T1)")))
+```
+
+Plot Crime models: 
+```{r}
+sum_df <- ate_long_mod %>%
+  group_by(model, group) %>%
+  dplyr::summarize(
+    low95 = quantile(ATE, .025),
+    med   = median(ATE),
+    up95  = quantile(ATE, .975),
+    .groups = "drop"
+  )
+
+sum_df
+
+delta_df <- ate_long_mod %>%
+  rename_with(~ "ATE", .cols = matches("^(ATE|ate)$"), ignore.case = TRUE) %>%
+  group_by(model, group) %>%
+  arrange(model, group) %>%          # keep order predictable
+  mutate(draw = row_number()) %>%    # index draws within each model x group
+  ungroup()%>%
+  pivot_wider(
+    id_cols   = c(model, draw),
+    names_from = group,
+    values_from = ATE,
+    names_prefix = "ATE_"
+  )%>%
+  mutate(delta = `ATE_High Crime` - `ATE_Low Crime`)%>%
+  group_by(model) %>%
+  dplyr::summarize(
+    delta_low95 = quantile(delta, probs = 0.025, na.rm = TRUE),
+    delta_med   = median(delta, na.rm = TRUE),
+    delta_up95  = quantile(delta, probs = 0.975, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+delta_df
+
+peaks <- ate_long_mod %>%
+  group_by(model, group) %>%
+  dplyr::summarize(peak_y = max(density(ATE)$y), .groups = "drop")
+
+sum_df2 <- left_join(sum_df, peaks, by = c("model","group")) %>%
+  pivot_longer(c(low95, med, up95), names_to = "stat", values_to = "x")
+
+crime_t1<- ggplot(ate_long_mod, aes(x = ATE, fill = group)) +
+  geom_density(alpha = 0.75) +
+  # short vertical markers (peak height) for each subgroup & model
+  geom_segment(data = sum_df2,
+               aes(x = x, xend = x, y = 0, yend = peak_y,
+                   color = group, linetype = stat),
+               linewidth = 0.7, show.legend = TRUE) +
+  scale_fill_manual(values = c("Low Crime" = "#D9B4F0", "High Crime" = "#5e3c99")) +   # adjust if you changed mod_label
+  scale_color_manual(values = c("Low Crime" ="#D9B4F0", "High Crime" = "#5e3c99")) +
+  scale_linetype_manual(values = c(low95 = "dashed", med = "solid", up95 = "dashed")) +
+  facet_wrap(~ model, ncol = 1, scales = "free_y") +
+  labs(x = "Average Treatment Effect (τ̄) within subgroup",
+       y = "Posterior density",
+       fill = "Moderator", color = "Moderator", linetype = NULL) +
+  theme_classic() +  guides(linetype="none") + theme(legend.position = 'bottom')
+
+crime_t1
+
+```
+
+load models:
+```{r}
+setwd('/Users/edenlab/OneDrive - PennO365/Double_Hit/2025/sensitivity')
+
+load("bcf_model_conduct_green_BIN_t1.RData")
+load("bcf_model_odd_green_BIN_t1.RData")
+load("bcf_model_adhd_green_BIN_t1.RData")
+```
+
+Run loop for Green:
+```{r}
+fits_mod <- list(
+  "ODD (T1)"  = bcf_out_con_green_BIN_t1,
+  "CD (T1)"   = bcf_out_con_green_BIN_t1,
+  "ADHD (T1)" = bcf_out_add_green_BIN_t1
+)
+
+mod_name <- "green_bin"   
+
+ate_long_mod <- imap_dfr(
+  fits_mod,
+  ~ get_subgroup_ate_draws(
+      fit         = .x,
+      moderator   = completed_data[[mod_name]],
+      model_label = .y,
+      mod_label   = "Green Space"          # label to print next to Low/High (customize per your moderator)
+    ))%>%
+  mutate(model = factor(model, level = c("CD (T1)", "ODD (T1)", "ADHD (T1)"), 
+                        labels = c("CD (T1)", "ODD (T1)", "ADHD (T1)")))
+```
+
+Plot Crime models: 
+```{r}
+sum_df <- ate_long_mod %>%
+  group_by(model, group) %>%
+  dplyr::summarize(
+    low95 = quantile(ATE, .025),
+    med   = median(ATE),
+    up95  = quantile(ATE, .975),
+    .groups = "drop"
+  )
+
+sum_df
+
+peaks <- ate_long_mod %>%
+  group_by(model, group) %>%
+  dplyr::summarize(peak_y = max(density(ATE)$y), .groups = "drop")
+
+sum_df2 <- left_join(sum_df, peaks, by = c("model","group")) %>%
+  pivot_longer(c(low95, med, up95), names_to = "stat", values_to = "x")
+
+green_t1<- ggplot(ate_long_mod, aes(x = ATE, fill = group)) +
+  geom_density(alpha = 0.75) +
+  # short vertical markers (peak height) for each subgroup & model
+  geom_segment(data = sum_df2,
+               aes(x = x, xend = x, y = 0, yend = peak_y,
+                   color = group, linetype = stat),
+               linewidth = 0.7, show.legend = TRUE) +
+  scale_fill_manual(values = c("Low Green Space" = "#C3E8A5", "High Green Space" = "#5CA81E")) +   # adjust if you changed mod_label
+  scale_color_manual(values = c("Low Green Space" = "#C3E8A5", "High Green Space" = "#5CA81E")) +
+  scale_linetype_manual(values = c(low95 = "dashed", med = "solid", up95 = "dashed")) +
+  facet_wrap(~ model, ncol = 1, scales = "free_y") +
+  labs(x = "Average Treatment Effect (τ̄) within subgroup",
+       y = "Posterior density",
+       fill = "Moderator", color = "Moderator", linetype = NULL) +
+  theme_classic() +  guides(linetype="none") + theme(legend.position = 'bottom')
+
+green_t1
+```
+
+load models:
+```{r}
+setwd('/Users/edenlab/OneDrive - PennO365/Double_Hit/2025/sensitivity')
+
+load("bcf_model_conduct_adi_BIN_t3.RData")
+load("bcf_model_odd_adi_BIN_t3.RData")
+load("bcf_model_adhd_adi_BIN_t3.RData")
+```
+
+Run loop for ADI:
+```{r}
+fits_mod <- list(
+  "ODD (T3)"  = bcf_out_SENS_odd_adi_BIN_t3,
+  "CD (T3)"   = bcf_out_SENS_con_adi_BIN_t3,
+  "ADHD (T3)" = bcf_out_SENS_add_adi_BIN_t3
+)
+
+mod_name <- "adi_bin"   
+
+ate_long_mod <- imap_dfr(
+  fits_mod,
+  ~ get_subgroup_ate_draws(
+      fit         = .x,
+      moderator   = completed_data[[mod_name]],
+      model_label = .y,
+      mod_label   = "ADI"          # label to print next to Low/High (customize per your moderator)
+    ))%>%
+  mutate(model = factor(model, level = c("CD (T3)", "ODD (T3)", "ADHD (T3)"), 
+                        labels = c("CD (T3)", "ODD (T3)", "ADHD (T3)")))
+```
+
+Plot ADI models: 
+```{r}
+sum_df <- ate_long_mod %>%
+  group_by(model, group) %>%
+  dplyr::summarize(
+    low95 = quantile(ATE, .025),
+    med   = median(ATE),
+    up95  = quantile(ATE, .975),
+    .groups = "drop"
+  )
+
+sum_df
+
+peaks <- ate_long_mod %>%
+  group_by(model, group) %>%
+  dplyr::summarize(peak_y = max(density(ATE)$y), .groups = "drop")
+
+sum_df2 <- left_join(sum_df, peaks, by = c("model","group")) %>%
+  pivot_longer(c(low95, med, up95), names_to = "stat", values_to = "x")
+
+adi_t2<- ggplot(ate_long_mod, aes(x = ATE, fill = group)) +
+  geom_density(alpha = 0.75) +
+  # short vertical markers (peak height) for each subgroup & model
+  geom_segment(data = sum_df2,
+               aes(x = x, xend = x, y = 0, yend = peak_y,
+                   color = group, linetype = stat),
+               linewidth = 0.7, show.legend = TRUE) +
+  scale_fill_manual(values = c("Low ADI" = "#CDE8FA", "High ADI" = "#4A8DBA")) +   # adjust if you changed mod_label
+  scale_color_manual(values = c("Low ADI" = "#CDE8FA", "High ADI" = "#4A8DBA")) +
+  scale_linetype_manual(values = c(low95 = "dashed", med = "solid", up95 = "dashed")) +
+  facet_wrap(~ model, ncol = 1, scales = "free_y") +
+  labs(x = "Average Treatment Effect (τ̄) within subgroup",
+       y = "Posterior density",
+       fill = "Moderator", color = "Moderator", linetype = NULL) +
+  theme_classic() +  guides(linetype="none") + theme(legend.position='bottom') 
+
+adi_t2
+
+```
+
+load models:
+```{r}
+setwd('/Users/edenlab/OneDrive - PennO365/Double_Hit/2025/sensitivity')
+
+load("bcf_model_conduct_crime_BIN_t3.RData")
+load("bcf_model_odd_crime_BIN_t3.RData")
+load("bcf_model_adhd_crime_BIN_t3.RData")
+```
+
+Run loop for Crime:
+```{r}
+fits_mod <- list(
+  "ODD (T3)"  = bcf_out_odd_crime_BIN_t3,
+  "CD (T3)"   = bcf_out_con_crime_BIN_t3,
+  "ADHD (T3)" = bcf_out_add_crime_BIN_t3
+)
+
+mod_name <- "crime_bin"   
+
+ate_long_mod <- imap_dfr(
+  fits_mod,
+  ~ get_subgroup_ate_draws(
+      fit         = .x,
+      moderator   = completed_data[[mod_name]],
+      model_label = .y,
+      mod_label   = "Crime"          # label to print next to Low/High (customize per your moderator)
+    ))%>%
+  mutate(model = factor(model, level = c("CD (T3)", "ODD (T3)", "ADHD (T3)"), 
+                        labels = c("CD (T3)", "ODD (T3)", "ADHD (T3)")))
+```
+
+Plot Crime models: 
+```{r}
+sum_df <- ate_long_mod %>%
+  group_by(model, group) %>%
+  dplyr::summarize(
+    low95 = quantile(ATE, .025),
+    med   = median(ATE),
+    up95  = quantile(ATE, .975),
+    .groups = "drop"
+  )
+
+sum_df
+
+peaks <- ate_long_mod %>%
+  group_by(model, group) %>%
+  dplyr::summarize(peak_y = max(density(ATE)$y), .groups = "drop")
+
+sum_df2 <- left_join(sum_df, peaks, by = c("model","group")) %>%
+  pivot_longer(c(low95, med, up95), names_to = "stat", values_to = "x")
+
+crime_t2<- ggplot(ate_long_mod, aes(x = ATE, fill = group)) +
+  geom_density(alpha = 0.75) +
+  # short vertical markers (peak height) for each subgroup & model
+  geom_segment(data = sum_df2,
+               aes(x = x, xend = x, y = 0, yend = peak_y,
+                   color = group, linetype = stat),
+               linewidth = 0.7, show.legend = TRUE) +
+  scale_fill_manual(values = c("Low Crime" = "#D9B4F0", "High Crime" = "#5e3c99")) +   # adjust if you changed mod_label
+  scale_color_manual(values = c("Low Crime" ="#D9B4F0", "High Crime" = "#5e3c99")) +
+  scale_linetype_manual(values = c(low95 = "dashed", med = "solid", up95 = "dashed")) +
+  facet_wrap(~ model, ncol = 1, scales = "free_y") +
+  labs(x = "Average Treatment Effect (τ̄) within subgroup",
+       y = "Posterior density",
+       fill = "Moderator", color = "Moderator", linetype = NULL) +
+  theme_classic() +  guides(linetype="none") + theme(legend.position = 'bottom')
+
+crime_t2
+
+```
+
+load models:
+```{r}
+setwd('/Users/edenlab/OneDrive - PennO365/Double_Hit/2025/sensitivity')
+
+load("bcf_model_conduct_green_BIN_t3.RData")
+load("bcf_model_odd_green_BIN_t3.RData")
+load("bcf_model_adhd_green_BIN_t3.RData")
+```
+
+Run loop for Segregation:
+```{r}
+fits_mod <- list(
+  "ODD (T3)"  = bcf_out_SENS_con_green_BIN_t3,
+  "CD (T3)"   = bcf_out_SENS_con_green_BIN_t3,
+  "ADHD (T3)" = bcf_out_SENS_add_green_BIN_t3
+)
+
+mod_name <- "green_bin"   
+
+ate_long_mod <- imap_dfr(
+  fits_mod,
+  ~ get_subgroup_ate_draws(
+      fit         = .x,
+      moderator   = completed_data[[mod_name]],
+      model_label = .y,
+      mod_label   = "Green Space"          # label to print next to Low/High (customize per your moderator)
+    ))%>%
+  mutate(model = factor(model, level = c("CD (T3)", "ODD (T3)", "ADHD (T3)"), 
+                        labels = c("CD (T3)", "ODD (T3)", "ADHD (T3)")))
+```
+
+Plot Crime models: 
+```{r}
+sum_df <- ate_long_mod %>%
+  group_by(model, group) %>%
+  dplyr::summarize(
+    low95 = quantile(ATE, .025),
+    med   = median(ATE),
+    up95  = quantile(ATE, .975),
+    .groups = "drop"
+  )
+
+sum_df
+
+peaks <- ate_long_mod %>%
+  group_by(model, group) %>%
+  dplyr::summarize(peak_y = max(density(ATE)$y), .groups = "drop")
+
+sum_df2 <- left_join(sum_df, peaks, by = c("model","group")) %>%
+  pivot_longer(c(low95, med, up95), names_to = "stat", values_to = "x")
+
+green_t2<- ggplot(ate_long_mod, aes(x = ATE, fill = group)) +
+  geom_density(alpha = 0.75) +
+  # short vertical markers (peak height) for each subgroup & model
+  geom_segment(data = sum_df2,
+               aes(x = x, xend = x, y = 0, yend = peak_y,
+                   color = group, linetype = stat),
+               linewidth = 0.7, show.legend = TRUE) +
+  scale_fill_manual(values = c("Low Green Space" = "#C3E8A5", "High Green Space" = "#5CA81E")) +   # adjust if you changed mod_label
+  scale_color_manual(values = c("Low Green Space" = "#C3E8A5", "High Green Space" = "#5CA81E")) +
+  scale_linetype_manual(values = c(low95 = "dashed", med = "solid", up95 = "dashed")) +
+  facet_wrap(~ model, ncol = 1, scales = "free_y") +
+  labs(x = "Average Treatment Effect (τ̄) within subgroup",
+       y = "Posterior density",
+       fill = "Moderator", color = "Moderator", linetype = NULL) +
+  theme_classic() +  guides(linetype="none") + theme(legend.position = 'bottom')
+
+green_t2
+```
+
+
+```{r}
+sensitivity_adi<- ggpubr::ggarrange(adi_t1, adi_t2, ncol=2, common.legend=T, labels=c("A", "B"))
+sensitivity_crime<- ggpubr::ggarrange(crime_t1, crime_t2, ncol=2, common.legend=T,labels=c("A", "B"))
+sensitivity_green<- ggpubr::ggarrange(green_t1, green_t2, ncol=2, common.legend=T, labels=c("A", "B"))
+sensitivity_adi
+sensitivity_crime
+sensitivity_green
+```
+

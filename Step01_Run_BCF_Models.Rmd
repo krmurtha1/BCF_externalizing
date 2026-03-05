@@ -1,0 +1,1026 @@
+---
+title: "Step01_Organize_Propensity_Data.Rmd"
+output: html_notebook
+---
+This R Notebook documents the steps taken to organize the data used for CU propensity matching projects for the ABCD Dataset. 
+
+First, install necessary packages. 
+
+```{r}
+library(MatchIt)
+library(boxr)
+library(tidyr)
+library(dplyr)
+library(cobalt)
+library(ggplot2)
+library(finalfit)
+library(haven)
+library(gghalves)
+library(usmap)
+library(bcf)
+```
+
+Specify that select function should be pulled from dplyr
+```{r}
+select <- dplyr::select
+recode<- dplyr::recode
+mutate<- dplyr::mutate
+```
+
+Next, log into PennBox, and set working directory the ABCD directory. We are using WAVE 5 Data for this project. 
+```{r}
+box_auth()
+
+box_setwd('167848222541')
+```
+
+---
+Step 1: Organize Data
+---
+
+Read in CBCL + SDQ to make a CU baseline traits score:
+```{r}
+cbcl<-box_read('1277090142488')
+cbcl_cu<- as_tibble(cbcl)%>%
+  filter(eventname == "baseline_year_1_arm_1")%>%
+  select(starts_with(c("src_subject_id", "cbcl_q26_p")))
+
+sdq<-box_read('1277071581025')
+sdq_cu<-as_tibble(sdq) %>%
+  filter(eventname == "baseline_year_1_arm_1")%>%
+  select(starts_with(c("src_subject_id","prosocial_q1_p","prosocial_q2_p","prosocial_q3_p")))%>%
+  mutate(prosocial_q1_p=recode(prosocial_q1_p, "2" = 0, "1"=1, "0" = 2))%>% #reverse code
+  mutate(prosocial_q2_p=recode(prosocial_q2_p, "2" = 0, "1"=1, "0" = 2))%>% #reverse code
+  mutate(prosocial_q3_p=recode(prosocial_q3_p, "2" = 0, "1"=1, "0" = 2)) #reverse code 
+  
+cu_score<- merge(cbcl_cu, sdq_cu, by="src_subject_id", all=T)%>%
+  mutate_at(vars(-c("src_subject_id")),as.numeric)%>%
+  mutate(cu_t1= cbcl_q26_p+prosocial_q1_p+prosocial_q2_p+prosocial_q3_p)%>%
+  mutate(cu_bin = case_when(cu_t1 >= 4 ~ 1, 
+                            cu_t1  == 0 ~ 0))%>%
+  select(src_subject_id, cu_t1, cu_bin)
+
+
+table(cu_score$cu_bin)
+```
+
+Read in data used for creation of propensity score: 
+```{r}
+ext_p<- box_read('1277091056577')%>%
+  filter(eventname == 'baseline_year_1_arm_1')%>%
+  select(src_subject_id, asr_scr_external_t)%>%
+  mutate(across(everything(), ~ifelse(.=="777", NA, as.character(.))))%>% #recode "unknown" cells as "NA" 
+  mutate(across(everything(), ~ifelse(.=="999", NA, as.character(.))))#recode "refused" cells as "NA"
+
+warmth_y<- box_read('1277078742059')%>%
+  filter(eventname == 'baseline_year_1_arm_1')%>%
+  select(src_subject_id, crpbi_y_ss_parent)%>%
+  mutate(across(everything(), ~ifelse(.=="777", NA, as.character(.))))%>% #recode "unknown" cells as "NA" 
+  mutate(across(everything(), ~ifelse(.=="999", NA, as.character(.))))#recode "refused" cells as "NA"
+
+chaos_y<- box_read('1277078756459')%>%
+  filter(eventname == 'baseline_year_1_arm_1')%>%
+  select(src_subject_id, fes_y_ss_fc)%>%
+  mutate(across(everything(), ~ifelse(.=="777", NA, as.character(.))))%>% #recode "unknown" cells as "NA" 
+  mutate(across(everything(), ~ifelse(.=="999", NA, as.character(.))))#recode "refused" cells as "NA"
+  
+demos<-box_read('1277081419111')%>%
+  filter(eventname == 'baseline_year_1_arm_1')%>%
+  select(src_subject_id, demo_brthdat_v2, eventname, demo_sex_v2, demo_prnt_ed_v2, demo_comb_income_v2,
+         demo_ethn_v2)%>%
+  mutate(across(everything(), ~ifelse(.=="777", NA, as.character(.))))%>% #recode "unknown" cells as "NA" 
+  mutate(across(everything(), ~ifelse(.=="999", NA, as.character(.))))#recode "refused" cells as "NA"
+
+ids<-box_read('1277070740402', fread=T)
+ids$site_id_l<-gsub('site','',ids$site_id_l)
+ids<-ids%>%
+  filter(eventname == 'baseline_year_1_arm_1')%>%
+  select(src_subject_id, site_id_l, rel_family_id)
+
+race<- box_read('1052335592112', fread=T)
+race<- race %>%
+  mutate(binary_race= case_when(race3 == 1 ~ 0, 
+                                FALSE ~ 1))%>%
+  mutate(src_subject_id = subjectkey)%>%
+  select(src_subject_id, binary_race)
+```
+Read in cortical and subcortical cGM 
+```{r}
+cortical<- box_read('1277074343528')
+subcort<- box_read('1277081154026')
+
+imaging<- merge(subcort, cortical)
+
+imaging<- imaging %>%
+  filter(eventname %in% c('baseline_year_1_arm_1'))%>%
+  select(starts_with(c('src_subject_id', 'smri_vol_scs_amygdala', 'smri_vol_cdk_rracate', 'smri_vol_cdk_cdacate')))%>%
+  mutate(bilateral_amygdala = smri_vol_scs_amygdalalh +smri_vol_scs_amygdalarh)%>%
+  mutate(bilateral_acc = smri_vol_cdk_rracatelh +smri_vol_cdk_rracaterh + smri_vol_cdk_cdacatelh +smri_vol_cdk_cdacaterh)%>%
+  select(starts_with(c('src_subject_id', 'bilateral')))
+```
+
+Merge together into one dataset: 
+```{r}
+propensity_data<- merge(ids, cu_score)
+propensity_data<- merge(propensity_data, demos)
+propensity_data<- merge(propensity_data, ext_p)
+propensity_data<- merge(propensity_data, warmth_y)
+propensity_data<- merge(propensity_data, chaos_y)
+propensity_data<- merge(propensity_data, race)
+propensity_data<- merge(propensity_data, imaging)
+```
+
+Standardize v's: 
+```{r}
+propensity_data<- propensity_data%>%
+  na.omit(cu_bin)%>%
+  mutate(
+    cu_bin = as.integer(cu_bin), 
+    site_id_l = factor(site_id_l))%>%
+  mutate(across(all_of(c("demo_comb_income_v2", "crpbi_y_ss_parent", "fes_y_ss_fc", "asr_scr_external_t", 
+                         "bilateral_amygdala", "bilateral_acc")),
+                as.numeric)) %>%
+  mutate(across(c(demo_comb_income_v2, crpbi_y_ss_parent, fes_y_ss_fc, asr_scr_external_t, bilateral_amygdala, bilateral_acc), 
+                ~ as.numeric(scale(.x)), 
+                .names = "{.col}_z"))
+```
+
+Create the propensity weights for CU traits using parenting, genetic risk, and household income
+```{r}
+p_cu <- glmer(cu_bin ~ demo_comb_income_v2_z +  crpbi_y_ss_parent_z + fes_y_ss_fc_z+ 
+                asr_scr_external_t_z + demo_sex_v2 +  bilateral_amygdala_z +
+                bilateral_acc_z + (1 | site_id_l),
+               na.action=na.exclude, 
+               family = binomial, data = propensity_data)
+
+summary(p_cu)
+
+propensity_data$p_cu <- predict(p_cu, type = "response")
+```
+
+Show distributions of propensity scores: 
+```{r}
+ggplot(propensity_data, aes(x = p_cu, fill = as.factor(cu_bin))) +
+  geom_density(alpha = 0.5) +
+  labs(x = "Predicted probability of CU group",
+       y = "Density",
+       fill = "Observed group") +
+  scale_fill_manual(labels = c('Low CU', 'High CU'), values = c('#C1CFCA', '#06948E'), name = "CU Group") +
+  theme_classic() + theme(legend.box.background = element_rect(color = "black", size = .75), 
+                                                       text = element_text(size=14))+ theme(legend.position = c(0.8, 0.8))
+```
+
+---
+Describe sample
+---
+
+Demo table 
+```{r}
+demo_table_data <- propensity_data %>%
+  select(demo_sex_v2, demo_comb_income_v2, demo_brthdat_v2, cu_bin, demo_ethn_v2)%>%
+  mutate(sex = dplyr::recode(demo_sex_v2, `1`='Female', `2`='Male')) %>%
+  mutate(
+    income = case_when(
+      demo_comb_income_v2 == 1 ~ 'Less than $5,000', 
+      demo_comb_income_v2 == 2 ~ '$5,000 - $11,999', 
+      demo_comb_income_v2 == 3 ~ '$12,000 through $15,999', 
+      demo_comb_income_v2 == 4 ~ '$16,000 through $24,999', 
+      demo_comb_income_v2 == 5 ~ '$25,000 through $34,999', 
+      demo_comb_income_v2 == 6 ~ '$35,000 through $49,999',
+      demo_comb_income_v2 == 7 ~ '$50,000 through $74,999',
+      demo_comb_income_v2 == 8 ~ '$75,000 through $99,999',
+      demo_comb_income_v2 == 9 ~ '$100,000 through $199,999',
+      demo_comb_income_v2 == 10 ~ '$200,000 and greater',
+      demo_comb_income_v2 == 999 ~ 'NA',
+      demo_comb_income_v2 == 777 ~ 'NA',
+      TRUE ~ 'NA'))%>%
+  mutate(race_char = case_when(demo_ethn_v2 == 2 ~ "Non Hispanic", 
+                               demo_ethn_v2 == 1 ~ "Hispanic", 
+                               TRUE ~ "Not reported"))%>%
+  mutate(race_char = as.character(race_char))%>%
+  mutate(demo_brthdat_v2 = as.numeric(demo_brthdat_v2))
+
+table(demo_table_data$race_char)
+
+demo_table_data %>%
+  set_column_labels(sex = "Sex", 
+                    demo_brthdat_v2 = "Age (Months)",
+                    income = "Household Income", 
+                    race_char = "Reported Ethnicity") %>%
+Gmisc::getDescriptionStatsBy(sex, demo_brthdat_v2, income,race_char,
+                      add_total_col = TRUE, statistics=TRUE,show_all_values=TRUE,
+                      by = cu_bin)
+
+#table(clusters$assignment_2)
+
+```
+
+Random plots for presentation
+```{r}
+#map
+highlighted_states <- c("OR","CA","UT","CO","OK","MN","WI","MI",
+                        "FL","SC","VA","DC","PA","NY","RI","VT","MD")
+
+all_states <- unique(usmap::us_map("states")$abbr)
+
+state_data <- data.frame(
+  state  = all_states,
+  color  = "#D3D3D3"          # light grey
+)
+state_data$color[state_data$state %in% highlighted_states] <- "#06948E"
+
+plot_usmap(data= state_data, values="color", color="white") + scale_fill_identity()  +
+  theme(legend.position='none')
+
+#pie charts
+cu_counts <- cu_score %>%
+  mutate(ses_bin = case_when(
+    cu_bin == 0 ~ 'No CU Traits',
+    cu_bin == 1 ~ 'High CU Traits',
+    TRUE ~ "Not Included"
+  )) 
+cu_counts <- as.data.frame(table(cu_counts$ses_bin))
+colnames(cu_counts) <- c("CU Traits", "count")
+cu_counts$percent <- cu_counts$count / sum(cu_counts$count) * 100
+
+sex_counts <- propensity_data %>%
+  mutate(sex_bin = case_when(
+    demo_sex_v2 == 1 ~ 'Male',
+    demo_sex_v2 == 2 ~ 'Female',
+    TRUE ~ "N/A"
+  )) 
+sex_counts <- as.data.frame(table(sex_counts$sex_bin))
+colnames(sex_counts) <- c("Sex", "count")
+sex_counts$percent <- sex_counts$count / sum(sex_counts$count) * 100
+
+# Create the pie chart
+ggplot(cu_counts, aes(x = "", y = count, fill = `CU Traits`)) +
+  geom_bar(width = 1, stat = "identity", color = 'white', alpha=.5) +
+  coord_polar("y", start = 0) +
+  scale_fill_manual(values = c("#06948E","#E69965",'lightgrey'))+
+  theme_void() +
+  theme(plot.title = element_text(hjust = 0.5))
+
+ggplot(sex_counts, aes(x = "", y = count, fill = `Sex`)) +
+  geom_bar(width = 1, stat = "identity", color = 'white', alpha=.5) +
+  coord_polar("y", start = 0) +
+  scale_fill_manual(values = c("#06948E","#E69965"))+
+  theme_void() +
+  theme(plot.title = element_text(hjust = 0.5))
+
+
+race<- box_read('1052335592112')
+race<- merge(race, propensity_data, by.x ='subjectkey', by.y='src_subject_id')
+race_counts <- as.data.frame(table(race$race3))
+colnames(race_counts) <- c("Race", "count")
+race_counts$percent <- race_counts$count / sum(race_counts$count) * 100
+
+ggplot(race_counts, aes(x = "", y = count, fill = `Race`)) +
+  geom_bar(width = 1, stat = "identity", color = 'white', alpha=.8) +
+  coord_polar("y", start = 0) +
+  scale_fill_manual(values = c("#06948E", "#4DA8A2", "#8ABCB6", "#C1CFCA", "#D3D3D3"), 
+                    labels = c("White", "Black/African American", "Asian", "More than one race","Other"))+
+  theme_void() +
+  theme(plot.title = element_text(hjust = 0.5))
+
+set.seed(42)
+
+x <- runif(100, 0, 50)          
+y <- 2 * x + rnorm(100, mean = 0, sd = 10)
+scatter_df <- data.frame(x = x, y = y)
+
+ggplot(scatter_df, aes(x=x, y=y)) +geom_point(color='#06948E') + geom_smooth(method='lm', color='#06948E', fill='#06948E') +
+  theme_classic()
+
+
+hist_df<- data.frame(x=rnorm(100, mean = 50, sd = 20), 
+                     y=rnorm(100, mean = 110, sd = 10), 
+                     z=rnorm(100, mean = 100, sd = 8))%>%
+  pivot_longer(cols = c(x,y,z))
+
+ggplot(hist_df, aes(x=value, group=name, fill=name)) + geom_density(alpha=0.5) +scale_fill_manual(values = c("#06948E", 
+                                                                                                              "#8ABCB6", 
+                                                                                                              "#C1CFCA"))+
+  theme_void()
+```
+
+Now read in our moderator data: 
+```{r}
+#read in area deprivation index 
+adi<-box_read('1277087025313', fread=TRUE)
+adi<-adi%>%
+  filter(eventname=="baseline_year_1_arm_1")%>%
+  mutate(adi_bin = case_when(reshist_addr1_adi_wsum <= 87.862045 ~ 0, #low deprivation
+                             reshist_addr1_adi_wsum >= 108.394920 ~ 1))%>% #high deprivation
+  mutate(adi_bin_SENS = case_when(reshist_addr1_adi_wsum < 98.777885 ~ 0, #low deprivation
+                             reshist_addr1_adi_wsum >= 98.777885 ~ 1))%>% #high deprivation
+  select(src_subject_id, reshist_addr1_adi_wsum, adi_bin, adi_bin_SENS)
+
+#read in greenspace
+green<-box_read('1277088493816', fread=TRUE)
+green<-green%>%
+  filter(eventname=="baseline_year_1_arm_1")%>%
+  mutate(green_bin = case_when(reshist_addr1_coi_he_green <= 14 ~ 0, #low green
+                             reshist_addr1_coi_he_green >= 48.025 ~ 1))%>% #high green
+  mutate(green_bin_SENS = case_when(reshist_addr1_coi_he_green < 34.100 ~ 0, #low green
+                             reshist_addr1_coi_he_green >= 34.100 ~ 1))%>% #high green
+  select(src_subject_id, reshist_addr1_coi_he_green, green_bin, green_bin_SENS)
+
+#read in geocoded crime
+crime<-box_read('1277095261533', fread=TRUE)
+crime<- crime%>%
+  filter(eventname=="baseline_year_1_arm_1")%>%
+  mutate(crime_log = log(reshist_addr1_grndtot +1))%>%
+  mutate(crime_bins = cut(reshist_addr1_grndtot, breaks = 6))%>%
+  mutate(crime_bin = case_when(reshist_addr1_grndtot <= 7832.00 ~ 0, 
+                               reshist_addr1_grndtot >= 53399.67 ~ 1))%>%
+  mutate(crime_bin_SENS = case_when(reshist_addr1_grndtot < 22761.33 ~ 0, 
+                               reshist_addr1_grndtot >= 22761.33 ~ 1))%>%
+  select(src_subject_id, reshist_addr1_grndtot, crime_bin, crime_bin_SENS)
+```
+
+And outcome data: 
+```{r}
+#cbcl data is already loaded from the CU traits score
+cbcl_dsm<- cbcl%>%
+  select(starts_with(c("src_subject_id","interview_age", "eventname",
+                       "cbcl_scr_syn_external_t", "cbcl_scr_dsm5_conduct_t", 
+                       "cbcl_scr_dsm5_opposit_t", "cbcl_scr_dsm5_adhd_t")))%>%
+  pivot_wider(names_from = eventname, values_from = c(cbcl_scr_syn_external_t, cbcl_scr_dsm5_conduct_t, 
+                                                      cbcl_scr_dsm5_opposit_t, cbcl_scr_dsm5_adhd_t))%>%
+  rename_with(~ tolower(gsub("baseline_year_1_arm_1", "t1", .x, fixed = TRUE))) %>% 
+  rename_with(~ tolower(gsub("2_year_follow_up_y_arm_1", "t3", .x, fixed = TRUE))) %>%
+  rename_with(~ tolower(gsub("1_year_follow_up_y_arm_1", "t2", .x, fixed = TRUE))) %>% 
+  rename_with(~ tolower(gsub("3_year_follow_up_y_arm_1", "t4", .x, fixed = TRUE))) %>%
+  rename_with(~ tolower(gsub("4_year_follow_up_y_arm_1", "t5", .x, fixed = TRUE)))
+```
+
+And merge:
+```{r}
+all_data<- merge(propensity_data, green)
+all_data<- merge(all_data, adi)
+all_data<- merge(all_data, crime)
+all_data<- merge(all_data, cbcl_dsm)
+```
+
+Impute missing data: 
+```{r, echo=FALSE, warning=FALSE, message=FALSE, include=FALSE}
+all_data<- all_data %>%
+  mutate(across(all_of(c("demo_sex_v2", "demo_brthdat_v2", "demo_ethn_v2", "demo_prnt_ed_v2")), as.numeric)) 
+
+imputed_data<- mice(all_data, m=5, method='pmm', seed=1234)
+completed_data <- complete(imputed_data)
+```
+
+Save data: 
+```{r}
+#write.csv(completed_data, file='bcf_completed_data.csv', row.names=F)
+```
+
+```{r}
+table_1_data<- all_data %>%
+  select(demo_sex_v2, demo_comb_income_v2, demo_brthdat_v2, cu_bin, demo_ethn_v2, 
+         crpbi_y_ss_parent_z, fes_y_ss_fc_z,
+        asr_scr_external_t_z,  bilateral_amygdala_z, bilateral_acc_z, cbcl_scr_dsm5_conduct_t_t1, cbcl_scr_dsm5_adhd_t_t1, cbcl_scr_dsm5_opposit_t_t1, 
+        cbcl_scr_dsm5_conduct_t_t3, cbcl_scr_dsm5_adhd_t_t3, cbcl_scr_dsm5_opposit_t_t3, reshist_addr1_grndtot, reshist_addr1_coi_he_green, reshist_addr1_adi_wsum)%>%
+  mutate(sex = dplyr::recode(demo_sex_v2, `1`='Female', `2`='Male')) %>%
+  mutate(
+    income = case_when(
+      demo_comb_income_v2 == 1 ~ 'Less than $5,000', 
+      demo_comb_income_v2 == 2 ~ '$5,000 - $11,999', 
+      demo_comb_income_v2 == 3 ~ '$12,000 through $15,999', 
+      demo_comb_income_v2 == 4 ~ '$16,000 through $24,999', 
+      demo_comb_income_v2 == 5 ~ '$25,000 through $34,999', 
+      demo_comb_income_v2 == 6 ~ '$35,000 through $49,999',
+      demo_comb_income_v2 == 7 ~ '$50,000 through $74,999',
+      demo_comb_income_v2 == 8 ~ '$75,000 through $99,999',
+      demo_comb_income_v2 == 9 ~ '$100,000 through $199,999',
+      demo_comb_income_v2 == 10 ~ '$200,000 and greater',
+      demo_comb_income_v2 == 999 ~ 'NA',
+      demo_comb_income_v2 == 777 ~ 'NA',
+      TRUE ~ 'NA'))%>%
+  mutate(race_char = case_when(demo_ethn_v2 == 2 ~ "Non Hispanic", 
+                               demo_ethn_v2 == 1 ~ "Hispanic", 
+                               TRUE ~ "Not reported"))%>%
+  mutate(race_char = as.character(race_char))%>%
+  mutate(demo_brthdat_v2 = as.numeric(demo_brthdat_v2))
+
+table(table_1_data$race_char)
+
+table_1_data %>%
+  set_column_labels(sex = "Sex", 
+                    demo_brthdat_v2 = "Age (Months)",
+                    income = "Household Income", 
+                    race_char = "Reported Ethnicity", 
+                    crpbi_y_ss_parent_z = 'Parental Warmth', 
+                    fes_y_ss_fc_z = 'Family Conflict',
+                    asr_scr_external_t_z = 'Parent Externalizing', 
+                    bilateral_amygdala_z = 'Bilateral Amygdala Volume', 
+                    bilateral_acc_z = 'Bilateral ACC Volume',
+                    reshist_addr1_adi_wsum = 'Area Deprivation Index', 
+                    reshist_addr1_coi_he_green = 'Access to Green Space', 
+                    reshist_addr1_grndtot = 'Exposure to Crime',
+                    cbcl_scr_dsm5_conduct_t_t1 = 'CD Symptoms (T1)', 
+                    cbcl_scr_dsm5_adhd_t_t1 = 'ADHD Symptoms (T1)', 
+                    cbcl_scr_dsm5_opposit_t_t1 = 'ODD Symptoms (T1)', 
+                    cbcl_scr_dsm5_conduct_t_t3 = 'CD Symptoms (T3)', 
+                    cbcl_scr_dsm5_adhd_t_t3 = 'ADHD Symptoms (T3)', 
+                    cbcl_scr_dsm5_opposit_t_t3 = 'ODD Symptoms (T3)'
+                     ) %>%
+Gmisc::getDescriptionStatsBy(crpbi_y_ss_parent_z, fes_y_ss_fc_z,
+        asr_scr_external_t_z,  bilateral_amygdala_z, bilateral_acc_z, reshist_addr1_adi_wsum, reshist_addr1_coi_he_green, reshist_addr1_grndtot, 
+        cbcl_scr_dsm5_conduct_t_t1, cbcl_scr_dsm5_adhd_t_t1, cbcl_scr_dsm5_opposit_t_t1, 
+        cbcl_scr_dsm5_conduct_t_t3, cbcl_scr_dsm5_adhd_t_t3, cbcl_scr_dsm5_opposit_t_t3,
+                      add_total_col = TRUE, statistics=TRUE,show_all_values=TRUE,
+                      by = cu_bin)
+
+```
+
+
+Save function to run anova: 
+```{r}
+# Define function to run anova tests
+run_anova <- function(y_var, predictor, data) {
+  # Dynamically construct the formula
+  formula <- as.formula(paste(y_var, "~", predictor))
+  # Run linear model (ANCOVA)
+  lm_model <- lm(formula, data = data)
+  
+  # Summarize the linear model
+  anova_summary <- summary(aov(lm_model))
+  
+  # Extract relevant ANOVA table information
+  result_table <- as.data.frame(anova_summary[[1]])%>%
+    rownames_to_column("term")%>%
+    mutate(statistic = `F value`)%>%
+    mutate(p.value = `Pr(>F)`)%>%
+    select(term, statistic, p.value) %>%
+    mutate(variable = y_var)
+  result_table <- result_table[-2, ]
+  
+  descriptives <- data %>%
+    group_by(.data[[predictor]]) %>%
+    summarise(
+      M  = mean(.data[[y_var]], na.rm = TRUE),
+      SD = sd(.data[[y_var]], na.rm = TRUE),
+      .groups = "drop"
+    ) %>%
+    mutate(group = as.character(.data[[predictor]])) %>%
+    select(-all_of(predictor)) %>%
+    pivot_wider(
+      names_from  = group,
+      values_from = c(M, SD),
+      names_glue  = "{.value}_{group}"
+    )
+  
+  # Bind ANOVA + descriptives
+  final_table <- bind_cols(result_table, descriptives)%>%
+    select(starts_with(c("term", "statistic", "p.value", "variable", "M_0", "M_1", "SD_0", "SD_1")))
+  
+  return(final_table)
+}
+```
+
+Compare v's based on CU 
+```{r}
+vars<- c('demo_comb_income_v2_z',  'crpbi_y_ss_parent_z', 'fes_y_ss_fc_z',
+        'asr_scr_external_t_z',  'bilateral_amygdala_z', 'bilateral_acc_z')
+
+anova_cu <- map_dfr(vars, ~ run_anova(.x, data = completed_data, predictor = 'cu_bin'))
+anova_adi <- map_dfr(vars, ~ run_anova(.x, data = completed_data, predictor = 'adi_bin'))
+anova_crime <- map_dfr(vars, ~ run_anova(.x, data = completed_data, predictor = 'crime_bin'))
+anova_green <- map_dfr(vars, ~ run_anova(.x, data = completed_data, predictor = 'green_bin'))
+```
+```{r}
+all_anova<- rbind(anova_cu, anova_adi, anova_crime, anova_green)
+
+results_table<- all_anova%>%
+  mutate(variable = dplyr::recode(variable, 'demo_comb_income_v2_z' = 'Household Income', 
+                       'crpbi_y_ss_parent_z' = 'Parental Warmth', 
+                       'fes_y_ss_fc_z' = 'Family Conflict',
+                       'asr_scr_external_t_z' = 'Parent Externalizing', 
+                       'bilateral_amygdala_z' = 'Bilateral Amygdala Volume', 
+                       'bilateral_acc_z' = 'Bilateral ACC Volume'))%>%
+  mutate(statistic = round(statistic, 2))%>%
+  mutate(p.value = round(p.value, 3))%>%
+  mutate(M_SD_0 = paste0(round(M_0, 2), " ", "(", round(SD_0,2), ")"))%>%
+  mutate(M_SD_1 = paste0(round(M_1,2), " ", "(", round(SD_1,2), ")"))%>%
+  select(-c(M_0, M_1, SD_0, SD_1))%>%
+  pivot_wider(values_from = c(statistic, p.value, M_SD_0, M_SD_1), names_from = term)%>%
+  gt()%>%
+  tab_header(
+    title = md("**Table X. Comparisons on**")
+  ) %>%
+  tab_spanner(label = "CU Traits", columns = starts_with(c("statistic_cu_bin", "p.value_cu_bin", "M_SD_0_cu_bin", "M_SD_1_cu_bin")))%>%
+  tab_spanner(label = "ADI", columns = starts_with(c("statistic_adi_bin", "p.value_adi_bin", "M_SD_0_adi_bin", "M_SD_1_adi_bin")))%>%
+  tab_spanner(label = "Crime", columns = starts_with(c("statistic_crime_bin","p.value_crime_bin", "M_SD_0_crime_bin", "M_SD_1_crime_bin")))%>%
+  tab_spanner(label = "Green Space", columns = starts_with(c("statistic_green_bin", "p.value_green_bin", "M_SD_0_green_bin", "M_SD_1_green_bin")))
+    
+results_table
+```
+
+```{r}
+propensity_data_long <- completed_data %>%
+  pivot_longer(cols = c("demo_comb_income_v2_z", "crpbi_y_ss_parent_z", "fes_y_ss_fc_z", "asr_scr_external_t_z", "bilateral_amygdala_z", 
+                        "bilateral_acc_z"))%>%
+  mutate(name = recode(name, 'demo_comb_income_v2_z' = 'Household Income', 
+                       'crpbi_y_ss_parent_z' = 'Parental Warmth', 
+                       'fes_y_ss_fc_z' = 'Family Conflict',
+                       'asr_scr_external_t_z' = 'Parent Externalizing', 
+                       'bilateral_amygdala_z' = 'Bilateral Amygdala Volume', 
+                       'bilateral_acc_z' = 'Bilateral ACC Volume'))
+
+cu_anova<- ggplot(propensity_data_long, aes(y = value, x = name, fill = as.factor(cu_bin))) +
+  geom_half_violin(
+    data = subset(propensity_data_long, cu_bin == 1),
+    aes(group = interaction(name, as.factor(cu_bin))),  # keep grouping explicit
+    side = "l", position = position_dodge(width = 0.64),
+    width = 0.8, alpha = 0.8, scale = "count", trim = FALSE
+  ) +
+  geom_half_violin(
+    data = subset(propensity_data_long, cu_bin == 0),
+    aes(group = interaction(name, as.factor(cu_bin))),
+    side = "r", position = position_dodge(width = 0.4),
+    width = 1, alpha = 0.8, scale = "count", trim = FALSE
+  ) + geom_half_boxplot(
+    data = subset(propensity_data_long, cu_bin == 1),
+    aes(group = interaction(name, as.factor(cu_bin))),  # keep grouping explicit
+    side = "l", position = position_dodge(width = 0.6),
+    width = 0.1, alpha = 0.8, scale = "count", trim = FALSE
+  ) +
+  geom_half_boxplot(
+    data = subset(propensity_data_long, cu_bin == 0),
+    aes(group = interaction(name, as.factor(cu_bin))),
+    side = "r", position = position_dodge(width = 0.6),
+    width = 0.1, alpha = 0.8, scale = "count", trim = FALSE
+  ) +
+  scale_y_continuous(limits = c(-3.5, 3.5)) +
+  coord_cartesian(clip = "off")+
+  labs(x='', y='Z-Score', fill=NULL) +
+  scale_fill_manual(labels = c('High CU', 'Low CU'), values = c('#06948E', '#C1CFCA')) +
+  theme_classic() + theme(axis.text.x = element_blank()) 
+
+adi_anova<- ggplot(propensity_data_long, aes(y = value, x = name, fill = as.factor(adi_bin))) +
+  geom_half_violin(
+    data = subset(propensity_data_long, adi_bin == 1),
+    aes(group = interaction(name, as.factor(adi_bin))),  # keep grouping explicit
+    side = "l", position = position_dodge(width = 0.64),
+    width = 0.8, alpha = 0.8, scale = "count", trim = FALSE
+  ) +
+  geom_half_violin(
+    data = subset(propensity_data_long, adi_bin == 0),
+    aes(group = interaction(name, as.factor(adi_bin))),
+    side = "r", position = position_dodge(width = 0.4),
+    width = 1, alpha = 0.8, scale = "count", trim = FALSE
+  ) + geom_half_boxplot(
+    data = subset(propensity_data_long, adi_bin == 1),
+    aes(group = interaction(name, as.factor(adi_bin))),  # keep grouping explicit
+    side = "l", position = position_dodge(width = 0.6),
+    width = 0.1, alpha = 0.8, scale = "count", trim = FALSE
+  ) +
+  geom_half_boxplot(
+    data = subset(propensity_data_long, adi_bin == 0),
+    aes(group = interaction(name, as.factor(adi_bin))),
+    side = "r", position = position_dodge(width = 0.6),
+    width = 0.1, alpha = 0.8, scale = "count", trim = FALSE
+  ) +
+  scale_y_continuous(limits = c(-3.5, 3.5)) +
+  coord_cartesian(clip = "off")+
+  labs(x='', y='Z-Score', fill=NULL) +
+  scale_fill_manual(labels = c('High ADI', 'Low ADI'), values = c('#4A8DBA','#CDE8FA')) +
+  theme_classic() + theme(axis.text.x = element_blank()) 
+
+crime_anova<- ggplot(propensity_data_long, aes(y = value, x = name, fill = as.factor(crime_bin))) +
+  geom_half_violin(
+    data = subset(propensity_data_long, crime_bin == 1),
+    aes(group = interaction(name, as.factor(crime_bin))),  # keep grouping explicit
+    side = "l", position = position_dodge(width = 0.64),
+    width = 0.8, alpha = 0.8, scale = "count", trim = FALSE
+  ) +
+  geom_half_violin(
+    data = subset(propensity_data_long, crime_bin == 0),
+    aes(group = interaction(name, as.factor(crime_bin))),
+    side = "r", position = position_dodge(width = 0.4),
+    width = 1, alpha = 0.8, scale = "count", trim = FALSE
+  ) + geom_half_boxplot(
+    data = subset(propensity_data_long, crime_bin == 1),
+    aes(group = interaction(name, as.factor(crime_bin))),  # keep grouping explicit
+    side = "l", position = position_dodge(width = 0.6),
+    width = 0.1, alpha = 0.8, scale = "count", trim = FALSE
+  ) +
+  geom_half_boxplot(
+    data = subset(propensity_data_long, crime_bin == 0),
+    aes(group = interaction(name, as.factor(crime_bin))),
+    side = "r", position = position_dodge(width = 0.6),
+    width = 0.1, alpha = 0.8, scale = "count", trim = FALSE
+  ) +
+  scale_y_continuous(limits = c(-3.5, 3.5)) +
+  coord_cartesian(clip = "off")+
+  labs(x='', y='Z-Score', fill=NULL) +
+  scale_fill_manual(labels = c('High Crime', 'Low Crime'), values = c('#5e3c99', '#D9B4F0')) +
+  theme_classic() + theme(axis.text.x = element_blank()) 
+
+green_anova<- ggplot(propensity_data_long, aes(y = value, x = name, fill = as.factor(green_bin))) +
+  geom_half_violin(
+    data = subset(propensity_data_long, green_bin == 1),
+    aes(group = interaction(name, as.factor(green_bin))),  # keep grouping explicit
+    side = "l", position = position_dodge(width = 0.64),
+    width = 0.8, alpha = 0.8, scale = "count", trim = FALSE
+  ) +
+  geom_half_violin(
+    data = subset(propensity_data_long, green_bin == 0),
+    aes(group = interaction(name, as.factor(green_bin))),
+    side = "r", position = position_dodge(width = 0.4),
+    width = 1, alpha = 0.8, scale = "count", trim = FALSE
+  ) + geom_half_boxplot(
+    data = subset(propensity_data_long, green_bin == 1),
+    aes(group = interaction(name, as.factor(green_bin))),  # keep grouping explicit
+    side = "l", position = position_dodge(width = 0.6),
+    width = 0.1, alpha = 0.8, scale = "count", trim = FALSE
+  ) +
+  geom_half_boxplot(
+    data = subset(propensity_data_long, green_bin == 0),
+    aes(group = interaction(name, as.factor(green_bin))),
+    side = "r", position = position_dodge(width = 0.6),
+    width = 0.1, alpha = 0.8, scale = "count", trim = FALSE
+  ) +
+  scale_y_continuous(limits = c(-3.5, 3.5)) +
+  coord_cartesian(clip = "off")+
+  labs(x='', y='Z-Score', fill=NULL) +
+  scale_fill_manual(labels = c('High Green Space', 'Low Green Space'), values = c('#5CA81E', '#C3E8A5')) +
+  theme_classic() +theme(axis.text.x = element_text(angle = 45, vjust = 0.5, hjust=1))
+```
+```{r, warning=FALSE}
+cu_anova + adi_anova + crime_anova + green_anova + 
+  plot_layout(nrow = 4)
+```
+
+---
+Run BCF models for T1 externalizing, estimating the ATE of CU traits 
+---
+```{r, echo=FALSE, warning=FALSE, message=FALSE, include=FALSE}
+bcf_out_con_t1 <- bcf(y         = completed_data$cbcl_scr_dsm5_conduct_t_t1,
+               z                = completed_data$cu_bin,
+               x_control        = as.matrix(completed_data$demo_sex_v2),
+               pihat            = completed_data$p_cu,
+               nburn            = 1000,
+               nsim             = 1000,
+               n_chains         = 4,
+               random_seed      = 1,
+               update_interval  = 1, 
+               no_output        = TRUE)
+
+bcf_out_opp_t1 <- bcf(y         = completed_data$cbcl_scr_dsm5_opposit_t_t1,
+               z                = completed_data$cu_bin,
+               x_control        = as.matrix(completed_data$demo_sex_v2),
+               pihat            = completed_data$p_cu,
+               nburn            = 1000,
+               nsim             = 1000,
+               n_chains         = 4,
+               random_seed      = 1,
+               update_interval  = 1, 
+               no_output        = TRUE)
+
+bcf_out_add_t1 <- bcf(y         = completed_data$cbcl_scr_dsm5_adhd_t_t1,
+               z                = completed_data$cu_bin,
+               x_control        = as.matrix(completed_data$demo_sex_v2),
+               pihat            = completed_data$p_cu,
+               nburn            = 1000,
+               nsim             = 1000,
+               n_chains         = 4,
+               random_seed      = 1,
+               update_interval  = 1, 
+               no_output        = TRUE)
+
+summary(bcf_out_con_t1)
+summary(bcf_out_opp_t1)
+summary(bcf_out_add_t1)
+```
+
+```{r}
+save(bcf_out_con_t1, file="/Users/edenlab/OneDrive - PennO365/Double_Hit/2025/bcf_model_conduct_t1.RData")
+save(bcf_out_opp_t1, file="/Users/edenlab/OneDrive - PennO365/Double_Hit/2025/bcf_model_odd_t1.RData")
+save(bcf_out_add_t1, file="/Users/edenlab/OneDrive - PennO365/Double_Hit/2025/bcf_model_adhd_t1.RData")
+```
+
+
+```{r, echo=FALSE, warning=FALSE, message=FALSE, include=FALSE}
+bcf_out_con_t3 <- bcf(y         = completed_data$cbcl_scr_dsm5_conduct_t_t3,
+               z                = completed_data$cu_bin,
+               x_control        = as.matrix(completed_data$demo_sex_v2),
+               pihat            = completed_data$p_cu,
+               nburn            = 1000,
+               nsim             = 1000,
+               n_chains         = 4,
+               random_seed      = 1,
+               update_interval  = 1, 
+               no_output        = TRUE)
+
+bcf_out_opp_t3 <- bcf(y         = completed_data$cbcl_scr_dsm5_opposit_t_t3,
+               z                = completed_data$cu_bin,
+               x_control        = as.matrix(completed_data$demo_sex_v2),
+               pihat            = completed_data$p_cu,
+               nburn            = 1000,
+               nsim             = 1000,
+               n_chains         = 4,
+               random_seed      = 1,
+               update_interval  = 1, 
+               no_output        = TRUE)
+
+bcf_out_add_t3 <- bcf(y         = completed_data$cbcl_scr_dsm5_adhd_t_t3,
+               z                = completed_data$cu_bin,
+               x_control        = as.matrix(completed_data$demo_sex_v2),
+               pihat            = completed_data$p_cu,
+               nburn            = 1000,
+               nsim             = 1000,
+               n_chains         = 4,
+               random_seed      = 1,
+               update_interval  = 1, 
+               no_output        = TRUE)
+
+summary(bcf_out_con_t3)
+summary(bcf_out_opp_t3)
+summary(bcf_out_add_t3)
+```
+
+```{r}
+save(bcf_out_con_t3, file="/Users/edenlab/OneDrive - PennO365/Double_Hit/2025/bcf_model_conduct_t3.RData")
+save(bcf_out_opp_t3, file="/Users/edenlab/OneDrive - PennO365/Double_Hit/2025/bcf_model_odd_t3.RData")
+save(bcf_out_add_t3, file="/Users/edenlab/OneDrive - PennO365/Double_Hit/2025/bcf_model_adhd_t3.RData")
+```
+
+
+---
+Model CATE of CU, moderation by DICHOTOMIZED ADI, crime, and discrim on externalizing outcomes 
+---
+
+Now moderated by ADI: 
+```{r, echo=FALSE, warning=FALSE, message=FALSE, include=FALSE}
+bcf_out_con_adi_BIN_t1 <- bcf(y   = completed_data$cbcl_scr_dsm5_conduct_t_t1,
+              z                = completed_data$cu_bin,
+              x_control        = as.matrix(completed_data$demo_sex_v2),
+              x_moderate       = as.matrix(completed_data$adi_bin),
+               pihat            = completed_data$p_cu,
+               nburn            = 1000,
+               nsim             = 1000,
+               n_chains         = 4,
+               random_seed      = 1,
+               update_interval  = 1, 
+               no_output        = TRUE)
+bcf_out_odd_adi_BIN_t1 <- bcf(y   = completed_data$cbcl_scr_dsm5_opposit_t_t1,
+               z                = completed_data$cu_bin,
+               x_control        = as.matrix(completed_data$demo_sex_v2),
+               x_moderate       = as.matrix(completed_data$adi_bin),
+               pihat            = completed_data$p_cu,
+               nburn            = 1000,
+               nsim             = 1000,
+               n_chains         = 4,
+               random_seed      = 1,
+               update_interval  = 1, 
+               no_output        = TRUE)
+bcf_out_add_adi_BIN_t1 <- bcf(y   = completed_data$cbcl_scr_dsm5_adhd_t_t1,
+               z                = completed_data$cu_bin,
+               x_control        = as.matrix(completed_data$demo_sex_v2),
+               x_moderate       = as.matrix(completed_data$adi_bin),
+               pihat            = completed_data$p_cu,
+               nburn            = 1000,
+               nsim             = 1000,
+               n_chains         = 4,
+               random_seed      = 1,
+               update_interval  = 1, 
+               no_output        = TRUE)
+```
+
+```{r}
+save(bcf_out_con_adi_BIN_t1, file="/Users/edenlab/OneDrive - PennO365/Double_Hit/2025/bcf_model_conduct_adi_BIN_t1.RData")
+save(bcf_out_odd_adi_BIN_t1, file="/Users/edenlab/OneDrive - PennO365/Double_Hit/2025/bcf_model_odd_adi_BIN_t1.RData")
+save(bcf_out_add_adi_BIN_t1, file="/Users/edenlab/OneDrive - PennO365/Double_Hit/2025/bcf_model_adhd_adi_BIN_t1.RData")
+```
+
+And crime: 
+```{r, echo=FALSE, warning=FALSE, message=FALSE, include=FALSE}
+bcf_out_con_crime_BIN_t1 <- bcf(y   = completed_data$cbcl_scr_dsm5_conduct_t_t1,
+              z                = completed_data$cu_bin,
+               x_control        = as.matrix(completed_data$demo_sex_v2),
+               x_moderate       = as.matrix(completed_data$crime_bin),
+               pihat            = completed_data$p_cu,
+               nburn            = 1000,
+               nsim             = 1000,
+               n_chains         = 4,
+               random_seed      = 1,
+               update_interval  = 1, 
+               no_output        = TRUE)
+
+bcf_out_odd_crime_BIN_t1 <- bcf(y   = completed_data$cbcl_scr_dsm5_opposit_t_t1,
+               z                = completed_data$cu_bin,
+               x_control        = as.matrix(completed_data$demo_sex_v2),
+               x_moderate       = as.matrix(completed_data$crime_bin),
+               pihat            = completed_data$p_cu,
+               nburn            = 1000,
+               nsim             = 1000,
+               n_chains         = 4,
+               random_seed      = 1,
+               update_interval  = 1, 
+               no_output        = TRUE)
+
+bcf_out_add_crime_BIN_t1 <- bcf(y   = completed_data$cbcl_scr_dsm5_adhd_t_t1,
+               z                = completed_data$cu_bin,
+               x_control        = as.matrix(completed_data$demo_sex_v2),
+               x_moderate       = as.matrix(completed_data$crime_bin),
+               pihat            = completed_data$p_cu,
+               nburn            = 1000,
+               nsim             = 1000,
+               n_chains         = 4,
+               random_seed      = 1,
+               update_interval  = 1, 
+               no_output        = TRUE)
+
+```
+
+```{r}
+save(bcf_out_con_crime_BIN_t1, file="/Users/edenlab/OneDrive - PennO365/Double_Hit/2025/bcf_model_conduct_crime_BIN_t1.RData")
+save(bcf_out_odd_crime_BIN_t1, file="/Users/edenlab/OneDrive - PennO365/Double_Hit/2025/bcf_model_odd_crime_BIN_t1.RData")
+save(bcf_out_add_crime_BIN_t1, file="/Users/edenlab/OneDrive - PennO365/Double_Hit/2025/bcf_model_adhd_crime_BIN_t1.RData")
+```
+
+And green space
+```{r, echo=FALSE, warning=FALSE, message=FALSE, include=FALSE}
+bcf_out_con_green_BIN_t1 <- bcf(y   = completed_data$cbcl_scr_dsm5_conduct_t_t1,
+               z                = completed_data$cu_bin,
+               x_control        = as.matrix(completed_data$demo_sex_v2),
+               x_moderate       = as.matrix(completed_data$green_bin),
+               pihat            = completed_data$p_cu,
+               nburn            = 1000,
+               nsim             = 1000 ,
+               n_chains         = 4,
+               random_seed      = 1,
+               update_interval  = 1, 
+               no_output        = TRUE)
+
+bcf_out_odd_green_BIN_t1 <- bcf(y   = completed_data$cbcl_scr_dsm5_opposit_t_t1,
+              z                = completed_data$cu_bin,
+               x_control        = as.matrix(completed_data$demo_sex_v2),
+               x_moderate       = as.matrix(completed_data$green_bin),
+               pihat            = completed_data$p_cu,
+               nburn            = 1000,
+               nsim             = 1000 ,
+               n_chains         = 4,
+               random_seed      = 1,
+               update_interval  = 1, 
+               no_output        = TRUE)
+
+bcf_out_add_green_BIN_t1 <- bcf(y   = completed_data$cbcl_scr_dsm5_adhd_t_t1,
+              z                = completed_data$cu_bin,
+               x_control        = as.matrix(completed_data$demo_sex_v2),
+               x_moderate       = as.matrix(completed_data$green_bin),
+               pihat            = completed_data$p_cu,
+               nburn            = 1000,
+               nsim             = 1000,
+               n_chains         = 4,
+               random_seed      = 1,
+               update_interval  = 1, 
+               no_output        = TRUE)   
+
+```
+
+```{r}
+save(bcf_out_con_green_BIN_t1, file="/Users/edenlab/OneDrive - PennO365/Double_Hit/2025/bcf_model_conduct_green_BIN_t1.RData")
+save(bcf_out_odd_green_BIN_t1, file="/Users/edenlab/OneDrive - PennO365/Double_Hit/2025/bcf_model_odd_green_BIN_t1.RData")
+save(bcf_out_add_green_BIN_t1, file="/Users/edenlab/OneDrive - PennO365/Double_Hit/2025/bcf_model_adhd_green_BIN_t1.RData")
+```
+
+Now moderated by ADI: 
+```{r, echo=FALSE, warning=FALSE, message=FALSE, include=FALSE}
+bcf_out_con_adi_BIN_t3 <- bcf(y   = completed_data$cbcl_scr_dsm5_conduct_t_t3,
+               z                = completed_data$cu_bin,
+               x_control        = as.matrix(completed_data$demo_sex_v2),
+               x_moderate       = as.matrix(completed_data$adi_bin),
+               pihat            = completed_data$p_cu,
+               nburn            = 1000,
+               nsim             = 1000,
+               n_chains         = 4,
+               random_seed      = 1,
+               update_interval  = 1, 
+               no_output        = TRUE)
+bcf_out_odd_adi_BIN_t3 <- bcf(y   = completed_data$cbcl_scr_dsm5_opposit_t_t3,
+               z                = completed_data$cu_bin,
+               x_control        = as.matrix(completed_data$demo_sex_v2),
+               x_moderate       = as.matrix(completed_data$adi_bin),
+               pihat            = completed_data$p_cu,
+               nburn            = 1000,
+               nsim             = 1000,
+               n_chains         = 4,
+               random_seed      = 1,
+               update_interval  = 1, 
+               no_output        = TRUE)
+
+bcf_out_add_adi_BIN_t3 <- bcf(y   = completed_data$cbcl_scr_dsm5_adhd_t_t3,
+               z                = completed_data$cu_bin,
+               x_control        = as.matrix(completed_data$demo_sex_v2),
+               x_moderate       = as.matrix(completed_data$adi_bin),
+               pihat            = completed_data$p_cu,
+               nburn            = 1000,
+               nsim             = 1000,
+               n_chains         = 4,
+               random_seed      = 1,
+               update_interval  = 1, 
+               no_output        = TRUE)
+```
+
+```{r}
+save(bcf_out_con_adi_BIN_t3, file="/Users/edenlab/OneDrive - PennO365/Double_Hit/2025/bcf_model_conduct_adi_BIN_t3.RData")
+save(bcf_out_odd_adi_BIN_t3, file="/Users/edenlab/OneDrive - PennO365/Double_Hit/2025/bcf_model_odd_adi_BIN_t3.RData")
+save(bcf_out_add_adi_BIN_t3, file="/Users/edenlab/OneDrive - PennO365/Double_Hit/2025/bcf_model_adhd_adi_BIN_t3.RData")
+```
+
+
+And crime: 
+```{r}
+bcf_out_con_crime_BIN_t3 <- bcf(y   = completed_data$cbcl_scr_dsm5_conduct_t_t3,
+               z                = completed_data$cu_bin,
+               x_control        = as.matrix(completed_data$demo_sex_v2),
+               x_moderate       = as.matrix(completed_data$crime_bin),
+               pihat            = completed_data$p_cu,
+               nburn            = 1000,
+               nsim             = 1000,
+               n_chains         = 4,
+               random_seed      = 1,
+               update_interval  = 1, 
+               no_output        = TRUE)
+
+bcf_out_odd_crime_BIN_t3 <- bcf(y   = completed_data$cbcl_scr_dsm5_opposit_t_t3,
+               z                = completed_data$cu_bin,
+               x_control        = as.matrix(completed_data$demo_sex_v2),
+               x_moderate       = as.matrix(completed_data$crime_bin),
+               pihat            = completed_data$p_cu,
+               nburn            = 1000,
+               nsim             = 1000,
+               n_chains         = 4,
+               random_seed      = 1,
+               update_interval  = 1, 
+               no_output        = TRUE)
+
+bcf_out_add_crime_BIN_t3 <- bcf(y   = completed_data$cbcl_scr_dsm5_adhd_t_t3,
+               z                = completed_data$cu_bin,
+               x_control        = as.matrix(completed_data$demo_sex_v2),
+               x_moderate       = as.matrix(completed_data$crime_bin),
+               pihat            = completed_data$p_cu,
+               nburn            = 1000,
+               nsim             = 1000,
+               n_chains         = 4,
+               random_seed      = 1,
+               update_interval  = 1, 
+               no_output        = TRUE)
+```
+
+```{r}
+save(bcf_out_con_crime_BIN_t3, file="/Users/edenlab/OneDrive - PennO365/Double_Hit/2025/bcf_model_conduct_crime_BIN_t3.RData")
+save(bcf_out_odd_crime_BIN_t3, file="/Users/edenlab/OneDrive - PennO365/Double_Hit/2025/bcf_model_odd_crime_BIN_t3.RData")
+save(bcf_out_add_crime_BIN_t3, file="/Users/edenlab/OneDrive - PennO365/Double_Hit/2025/bcf_model_adhd_crime_BIN_t3.RData")
+```
+
+
+```{r, echo=FALSE, warning=FALSE, message=FALSE, include=FALSE}
+bcf_out_con_green_BIN_t3 <- bcf(y   = completed_data$cbcl_scr_dsm5_conduct_t_t3,
+               z                = completed_data$cu_bin,
+               x_control        = as.matrix(completed_data$demo_sex_v2),
+               x_moderate       = as.matrix(completed_data$green_bin),               
+               pihat            = completed_data$p_cu,
+               nburn            = 1000,
+               nsim             = 1000 ,
+               n_chains         = 4,
+               random_seed      = 1,
+               update_interval  = 1, 
+               no_output        = TRUE)
+
+bcf_out_odd_green_BIN_t3 <- bcf(y   = completed_data$cbcl_scr_dsm5_opposit_t_t3,
+               z                = completed_data$cu_bin,
+               x_control        = as.matrix(completed_data$demo_sex_v2),
+               x_moderate       = as.matrix(completed_data$green_bin),
+               pihat            = completed_data$p_cu,
+               nburn            = 1000,
+               nsim             = 1000 ,
+               n_chains         = 4,
+               random_seed      = 1,
+               update_interval  = 1, 
+               no_output        = TRUE)
+
+bcf_out_add_green_BIN_t3 <- bcf(y   = completed_data$cbcl_scr_dsm5_adhd_t_t3,
+               z                = completed_data$cu_bin,
+               x_control        = as.matrix(completed_data$demo_sex_v2),
+               x_moderate       = as.matrix(completed_data$green_bin),
+               pihat            = completed_data$p_cu,
+               nburn            = 1000,
+               nsim             = 1000,
+               n_chains         = 4,
+               random_seed      = 1,
+               update_interval  = 1, 
+               no_output        = TRUE)   
+```
+
+```{r}
+save(bcf_out_con_green_BIN_t3, file="/Users/edenlab/OneDrive - PennO365/Double_Hit/2025/bcf_model_conduct_green_BIN_t3.RData")
+save(bcf_out_odd_green_BIN_t3, file="/Users/edenlab/OneDrive - PennO365/Double_Hit/2025/bcf_model_odd_green_BIN_t3.RData")
+save(bcf_out_add_green_BIN_t3, file="/Users/edenlab/OneDrive - PennO365/Double_Hit/2025/bcf_model_adhd_green_BIN_t3.RData")
+```
+
